@@ -26,15 +26,23 @@
           - id: qwen3.5:4b-mlx
             name: Qwen3.5 4B (MLX)
             contextWindow: 262144
+            input: [text, image]
             reasoningEfforts:
               off: none
               high: high
           - id: gemma4:e2b-mlx
             name: Gemma4 E2B (MLX)
             contextWindow: 131072
+            input: [text, image]
             reasoningEfforts:
               off: none
               high: high
+
+# `input` is not optional in practice. pi-ai falls back to DEFAULT_INPUT = ["text"] for any
+# model entry that omits it, and dsh-tool-fs then refuses every image: `model
+# "gemma4:e2b-mlx" does not declare image input`. Both models below do handle images — that
+# was measured, but by calling Ollama directly, which never consults this profile. Leaving
+# the field out silently disables the read_image tool. MODALITIES is exactly text | image.
 
 # Default model = gemma4:e2b-mlx (not qwen). Rationale in docs/LOCAL-MODEL-EVAL.md:
 # 2-4x faster on short tasks (full 18-question suite: 18s vs 49s), lower latency, and its

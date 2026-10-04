@@ -274,3 +274,68 @@ Ollama 默认 `thinking=on`,小模型会把输出预算耗在思考链上。在 
 在 system prompt 里点名两个必填参数后(`cordis.patch.yml` 里对 `system-prompt` 的覆盖),
 gemma4 连跑两轮共 **7 次** bash 调用全部带上 `description`,缺参数报错 0 次。
 代价是 `systemTokens` 从 220 涨到 259(+39),`toolsTokens` 不变。
+
+`write` 是同一类毛病,而且更隐蔽:gemma4 先吐长长的 `content`,然后直接闭合 JSON,
+把同样必填的 `file_path` 漏掉。它是**间歇性**的,而且**不是截断**——参数 JSON 能正常解析,
+只是少了一个 key。三次尝试里失败 1 次(正文 3.8 KB)、成功 2 次(其中一次正文 4.2 KB)。
+提示词现在也点名了 write 的两个参数与顺序。
+
+---
+
+## 附三、工具面实测(2026-10-05)
+
+在实例的隔离副本上,用 `local` 档案 + `gemma4:e2b-mlx` 每个工具跑一道题,
+从运行事件流里读回真实的调用与结果。
+
+| 工具 | 结果 | 证据 |
+|---|---|---|
+| `glob` | ✅ | 列出三个 `.md`,含子目录里的那个 |
+| `grep` | ✅ | 精确定位含标记串的唯一文件 |
+| `read` | ✅ | 返回文件正文 |
+| `write` | ✅ | 创建 `notes.md`,这次 `file_path` 在 |
+| `edit` | ✅ | 文件最终精确为 `# Notes\nHELLO\nworld` |
+| `todo_write` | ✅ | 建立三项清单 |
+| `read_image` | ❌ → 已修 | 见下 |
+| `bash` | **未能验证** | 测试所在 shell 无法嵌套 `sandbox-exec`,沙箱后端拒绝了每条命令。这是**测试环境**的产物,不能作为档案本身的证据 |
+| `present` | **未执行** | 纯 UI 工具(渲染文件卡片),挂在 `chat` 档案里,没有 headless 路径可以驱动 |
+
+### `read_image` 原本是死的:模态未声明
+
+第一次尝试直接失败:
+
+```
+Error: cannot read "picture.png" as an image:
+model "gemma4:e2b-mlx" does not declare image input
+```
+
+任何省略 `input` 字段的模型条目,pi-ai 都会回落到 `DEFAULT_INPUT = ["text"]`,
+随后 `dsh-tool-fs` 拒绝一切图片。这两个条目是手写的、从没声明过它,于是工具被静默废掉
+——**尽管 gemma4 确实能看图**。本报告前面的视觉结论是直连 Ollama 测的,根本不经过档案,
+所以不可能发现这一点。
+
+声明 `input: [text, image]` 即可修复(`MODALITIES` 只有 `text | image` 两个合法值):
+图片能送进模型,它准确认出了蓝色图形是方形。
+
+**但计数仍不可靠。** 在一张「两个红圆 + 一个蓝方」的合成图上,gemma4 两次都答
+"三个红圆",以及"一共四个图形"。本报告前面的 `vision_count` 通过**不能外推**——
+视觉计数与图像内容强相关。
+
+### thinking 几乎不花钱,却是推理的必需品
+
+一道多步应用题,gemma4,每档跑两次,用 `--patch` 覆盖切换 thinking(不改档案):
+
+| | 耗时 | 输出 | 严格判分 |
+|---|---|---|---|
+| think off #1 | 7.2 s | `The calculation is:\n1. Total students: 3…`(被截断) | ✘ |
+| think off #2 | 3.9 s | `I need to perform a mathematical calcula…`(被截断) | ✘ |
+| **think high #1** | 7.1 s | `6` | **✓** |
+| **think high #2** | 4.4 s | `6` | **✓** |
+
+会话日志确认开关确实生效:两次 `high` 各带 1 个推理块,两次 `off` 都是 0。
+
+所以对推理任务,thinking 不只是"锦上添花"——不开时模型把预算耗在绕圈上,压根没给出可用答案;
+而且它**没有带来耗时代价**,这次样本里反而更快,因为不思考的那两次在空转烧 token。
+`n=2`,不要过度外推。
+
+正因如此,`chat` 档案在 `agent-default-model` 上设了 `reasoningEffort: high`,而 `local` 保持关闭
+——一个是对话界面,一个是批处理一次性执行器。

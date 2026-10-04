@@ -328,3 +328,72 @@ After naming both required parameters in the system prompt (the `system-prompt` 
 `cordis.patch.yml`), gemma4 sent `description` on all **7** bash calls across two runs, with 0
 missing-parameter errors. The cost is `systemTokens` rising from 220 to 259 (+39); `toolsTokens` is
 unchanged.
+
+`write` has the same failure mode, one level worse: gemma4 emits the long `content` value first and
+then closes the JSON without appending the also-required `file_path`. It is intermittent and it is
+*not* truncation — the arguments JSON parses cleanly, the key is simply absent. Over three attempts,
+one failed (3.8 KB body) and two succeeded, one of them with a 4.2 KB body. The prompt now names
+write's parameters and their order as well.
+
+---
+
+## Appendix 3: tool-surface test (2026-10-05)
+
+One task per tool, run against the `local` profile with `gemma4:e2b-mlx` in an isolated copy of the
+instance, reading tool calls and results out of the run's event stream.
+
+| Tool | Result | Evidence |
+|---|---|---|
+| `glob` | ✅ | listed three `.md` files, including one in a subdirectory |
+| `grep` | ✅ | located the single file containing a marker token |
+| `read` | ✅ | returned the file body |
+| `write` | ✅ | created `notes.md`; `file_path` was present this time |
+| `edit` | ✅ | the file ended up as exactly `# Notes\nHELLO\nworld` |
+| `todo_write` | ✅ | built a three-item list |
+| `read_image` | ❌ → now fixed | see below |
+| `bash` | **not verified** | the test shell could not nest `sandbox-exec`, so the sandbox backend refused every command. That is an artefact of where the test ran, not evidence about the profile |
+| `present` | **not executed** | a UI-only tool that renders file cards. It is mounted in the `chat` profile, and there is no headless path to exercise it |
+
+### `read_image` was dead: an undeclared input modality
+
+The first attempt failed with:
+
+```
+Error: cannot read "picture.png" as an image:
+model "gemma4:e2b-mlx" does not declare image input
+```
+
+pi-ai falls back to `DEFAULT_INPUT = ["text"]` for any model entry that omits the `input` field, and
+`dsh-tool-fs` then refuses every image. These entries were hand-written and never declared it, so
+the tool was silently unusable — **even though gemma4 does handle images**. The vision results
+earlier in this report were obtained by calling Ollama directly, which never consults the profile,
+so they could not have caught it.
+
+Declaring `input: [text, image]` fixes it (`MODALITIES` is exactly `text | image`): the image now
+reaches the model, which correctly identified the blue shape as a square.
+
+**Counting is still unreliable.** On a synthetic image holding two red circles and one blue square,
+gemma4 answered "three red circles" twice, and "four shapes in total". The `vision_count` pass
+earlier in this report does not generalise — treat vision counting as content-dependent.
+
+### Thinking is close to free, and necessary for reasoning
+
+A multi-step word problem, gemma4, two runs each way, thinking switched with a `--patch` overlay
+rather than by editing the profile:
+
+| | Wall time | Output | Strictly correct |
+|---|---|---|---|
+| think off #1 | 7.2 s | `The calculation is:\n1. Total students: 3…` (cut off) | ✘ |
+| think off #2 | 3.9 s | `I need to perform a mathematical calcula…` (cut off) | ✘ |
+| **think high #1** | 7.1 s | `6` | **✓** |
+| **think high #2** | 4.4 s | `6` | **✓** |
+
+The session log confirms the switch took effect: the two `high` runs carry one reasoning block each,
+the two `off` runs none.
+
+On reasoning work thinking is therefore not merely nice to have — without it the model spent its
+budget rambling and never emitted a usable answer. Nor did it cost wall time; on this sample it was
+slightly *faster*, because the unthinking runs burn tokens going nowhere. `n=2`: do not over-read it.
+
+Because of this the `chat` profile sets `reasoningEffort: high` on `agent-default-model`, while
+`local` stays off — one is a conversation UI, the other a batch one-shot runner.
