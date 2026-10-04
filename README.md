@@ -20,12 +20,13 @@ bundles or redistributes DSH. You need:
 1. **[DeepSeek Harness](https://www.deepseek.com/harness/) (DSH) installed** — the `dsh` CLI
    together with the
    `@deepseek-ai/dsh-base` and `@deepseek-ai/dsh-headless` plugin bundles it ships.
-2. macOS or Linux, with a running Ollama.
+2. A running **Ollama** — on **Apple Silicon (macOS)** if you want the default model. Linux and
+   CPU-only machines need a different model tag; see [Platform support](#platform-support).
 3. The models pulled:
 
 ```sh
-ollama pull gemma4:e2b-mlx   # the default model
-ollama pull qwen3.5:4b-mlx   # optional second model, registered and ready to switch to
+ollama pull gemma4:e2b-mlx   # the default model — Apple Silicon only
+ollama pull qwen3.5:4b-mlx   # optional second model, likewise Apple Silicon only
 ```
 
 Then clone and run. **`DSH_HOME` must point at this repository root** — the repo *is* the harness
@@ -50,6 +51,26 @@ Inspect the composed configuration without booting anything:
 ```sh
 DSH_HOME="$PWD" dsh --profile local --dump-config
 ```
+
+## Platform support
+
+**The default model is Apple Silicon only.** `gemma4:e2b-mlx` and `qwen3.5:4b-mlx` are MLX builds,
+which run on Apple Silicon GPUs — and they are what every measurement in this repository was taken
+on.
+
+On Linux, or on any machine without an Apple Silicon GPU, pull a non-MLX tag of the same model and
+point the profile at it:
+
+```sh
+ollama pull gemma4:e2b-it-q4_K_M
+```
+
+then change the `model` field of the `agent-default-model` entry in
+[`profiles/local/cordis.patch.yml`](profiles/local/cordis.patch.yml) to `gemma4:e2b-it-q4_K_M`.
+
+Everything else in the profile — the eight-tool surface, thinking off, the system-prompt hint — is
+platform-independent. Only the weights change; the throughput and latency figures in the evaluation
+report are specific to MLX on an M4 and will not transfer.
 
 ## What the profile changes
 
