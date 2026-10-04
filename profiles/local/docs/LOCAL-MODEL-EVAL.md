@@ -4,9 +4,9 @@
 > profile's `cordis.patch.yml` (this file lives in `profiles/local/docs/`; the patch sits at the
 > profile root) — which model to pick, why thinking must be switched off explicitly, why JSON
 > cannot rely on a native schema — has its supporting measurement below.
-> The test scripts and the raw per-question output stay in the development workspace, rooted at
-> `/Users/moon/project/test`; only these conclusions are kept inside the profile.
-> They live in the profile (rather than at the instance root) so that they ship with the profile.
+> The test scripts and the raw per-question output stay in the (unpublished) development
+> workspace; only these conclusions are kept inside the profile.
+> A Chinese translation of this report is available as `LOCAL-MODEL-EVAL.zh-CN.md`.
 >
 > Test-output strings that were Chinese in the original run are kept verbatim as data and glossed
 > in English; they have not been translated or altered.
@@ -228,8 +228,8 @@ are used.
 
 ## Appendix: artefact inventory
 
-Paths are rooted at `/Users/moon/project/test` (the test scripts and raw output are not inside this
-profile; the profile keeps only these conclusions).
+Relative to the (unpublished) development workspace. The test scripts and raw output are not part
+of this repository; only these conclusions are.
 
 | File | Contents |
 |---|---|
