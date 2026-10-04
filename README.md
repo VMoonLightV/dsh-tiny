@@ -32,7 +32,7 @@ Then clone and run. **`DSH_HOME` must point at this repository root** — the re
 instance, and the profile lives at `profiles/local/`:
 
 ```sh
-git clone <your-fork-url> tiny
+git clone git@github.com:VMoonLightV/dsh-tiny.git tiny
 cd tiny
 DSH_HOME="$PWD" dsh --profile local "list the files in the current directory"
 ```
