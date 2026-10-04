@@ -120,6 +120,13 @@
 # across two runs, with 0 missing-parameter errors. Cost: systemTokens 220 -> 259 (+39);
 # toolsTokens unchanged.
 #
+# `write` has the same failure mode, one level worse. gemma4 emits the long `content` value
+# first and then closes the JSON without appending `file_path`. It is intermittent and it is
+# NOT truncation: the arguments JSON parses cleanly, the key is simply absent. Measured over
+# three attempts, 1 failed (3.8 KB body) and 2 succeeded, including one with a 4.2 KB body.
+# So the hint below also names write's two parameters and their order. This lowers the odds;
+# it cannot make a 4B model deterministic.
+#
 # Note: a patch `config` replaces the whole config, so both factory fields must be written
 # back below or personaPrefix / personaSuffix are dropped entirely. The {{model}} and {{cwd}}
 # interpolations are unchanged.
@@ -130,3 +137,5 @@
       Your working directory is {{cwd}}.
       The bash tool takes two required parameters: "command" and "description".
       Always send both; "description" is a 5-10 word summary of what the command does.
+      The write tool takes two required parameters: "file_path" and "content".
+      Send "file_path" first, then "content". Never omit either.
