@@ -1,0 +1,132 @@
+# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+# Point the harness at small models served by the local Ollama.
+#
+# The factory layer already ships an `llm-pi-ai` entry, so this file only overrides its
+# config by id — no new plugin is needed. Three points, all learned the hard way:
+#
+#   1. `api: openai-completions` + a `baseURL` pointing at Ollama's OpenAI-compatible endpoint.
+#   2. The local server has no API key, but pi-ai's OpenAI-compatible adapter insists on an
+#      auth header, so a placeholder credential is mandatory (otherwise the request is rejected).
+#   3. thinking must be switched off explicitly. Ollama defaults to thinking=on, which burns the
+#      whole output budget on a small model (measured on a headless task: 1m20s -> 14s).
+#      Note `reasoningEfforts: false` does nothing, and the level keys must stay inside the
+#      fixed enum, so `off: none` is what actually emits reasoning_effort=none.
+- id: llm-pi-ai
+  config:
+    providers:
+      ollama:
+        displayName: Ollama (local)
+        api: openai-completions
+        baseURL: http://127.0.0.1:11434/v1
+        headers:
+          Authorization: Bearer ollama
+        models:
+          - id: qwen3.5:4b-mlx
+            name: Qwen3.5 4B (MLX)
+            contextWindow: 262144
+            reasoningEfforts:
+              off: none
+              high: high
+          - id: gemma4:e2b-mlx
+            name: Gemma4 E2B (MLX)
+            contextWindow: 131072
+            reasoningEfforts:
+              off: none
+              high: high
+
+# Default model = gemma4:e2b-mlx (not qwen). Rationale in docs/LOCAL-MODEL-EVAL.md:
+# 2-4x faster on short tasks (full 18-question suite: 18s vs 49s), lower latency, and its
+# thinking converges; qwen's thinking collapses into a loop (16k-token budget, 45k characters
+# of chain, still no answer). Leave this entry alone and the agent keeps running on deepseek-official.
+- id: agent-default-model
+  config:
+    provider: ollama
+    model: gemma4:e2b-mlx
+
+# ---------------------------------------------------------------------------
+# Tool-surface trimming: this instance only serves local small models, and the 14 tool
+# families the factory mounts by default are dead weight here.
+#
+# Why `disabled: true` instead of "just don't write it down":
+#   This profile's package.json mounts only two bundles, dsh-base + dsh-headless, and
+#   cordis.yml is []. The entire plugin tree is expanded from those bundles — those entries
+#   are not ours, so "do not mount it" has nowhere else to be expressed. A patch entry can
+#   only carry id / name / config / group / disabled / inject / intercept / isolate
+#   (see `$defs.patch` from `dsh --profile local --dump-config-schema`); there is no
+#   remove/delete. The factory layer disables entries the same way (tool-ralph, skill-badge).
+#   Note: `disabled` deletes no package, does not touch package.json and leaves bundles
+#   alone — it only skips the entry during composition.
+#
+# Kept (4 plugins / 8 tools — exactly what the eval found these models good at:
+# single-step work, well-formed output, vision):
+#   tool-bash       -> bash
+#   tool-fs         -> read / write / edit / read_image
+#   tool-fs-search  -> glob / grep
+#   tool-todo       -> todo_write (externalises progress on multi-step tasks)
+#
+# Disabled:
+#   tool-jobs      job_list / job_output / job_kill — useless for a one-shot headless task
+#   tool-skill     skill                            — no skill package is installed here
+#   tool-goal      create_goal / get_goal / update_goal
+#   tool-subagent  subagent / subagent_fork
+#   tool-subagent-control  send_message / interrupt_agent / list_agents
+#   tool-workflow  workflow    — the four families above all need multi-step reasoning
+#                                (eval: multi-step inference 0/2), and every subagent
+#                                re-pays the full context
+#   tool-web       web_search / web_fetch — goes through DEEPSEEK_API_KEY; this instance has no credentials
+#   tool-pwsh      pwsh        — already platform-disabled by the factory; pinned here for cross-platform parity
+#   plan-mode      exit_plan_mode — a one-shot headless task has no "plan mode"
+#
+# Measured (same task, counts read from storages/session_projcache; figures also in
+# docs/LOCAL-MODEL-EVAL.md, appendix 2):
+#   before: toolsTokens 4633 / systemTokens 651
+#   after:  toolsTokens 1815 / systemTokens 220
+# The service plugins (goal / subagent / workflow-ptc / web / skill) need no attention: they
+# produce no tools themselves and add nothing to the system prompt. Measured: disabling the
+# tool-* entries alone captures the entire win.
+- id: tool-pwsh
+  disabled: true
+- id: tool-jobs
+  disabled: true
+- id: tool-skill
+  disabled: true
+- id: tool-goal
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- id: tool-web
+  disabled: true
+- id: plan-mode
+  disabled: true
+
+# ---------------------------------------------------------------------------
+# Small models need the required parameters spelled out, or they fill in the wrong field.
+#
+# `bash` requires both command and description, but the sandbox-escalation fields
+# sandbox_permissions / justification sit in the same schema. Same task, measured:
+#   qwen3.5:4b — missed description on the first try, added it after reading the error
+#   gemma4:e2b — filled justification instead of description 4 times in a row, then gave up
+# After naming both parameters in the system prompt, gemma4 sent description on all 7 calls
+# across two runs, with 0 missing-parameter errors. Cost: systemTokens 220 -> 259 (+39);
+# toolsTokens unchanged.
+#
+# Note: a patch `config` replaces the whole config, so both factory fields must be written
+# back below or personaPrefix / personaSuffix are dropped entirely. The {{model}} and {{cwd}}
+# interpolations are unchanged.
+- id: system-prompt
+  config:
+    personaPrefix: You are a coding agent powered by the {{model}} model.
+    personaSuffix: >-
+      Your working directory is {{cwd}}.
+      The bash tool takes two required parameters: "command" and "description".
+      Always send both; "description" is a 5-10 word summary of what the command does.

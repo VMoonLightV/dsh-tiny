@@ -1,0 +1,124 @@
+# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+# 把 harness 的模型换成【本机 Ollama】上的小模型。
+#
+# 出厂层里已经有一行 `llm-pi-ai`,所以这里只需按 id 覆盖它的 config,
+# 不需要新增插件。要点有三条,都是实测踩出来的:
+#
+#   1. `api: openai-completions` + `baseURL` 指向 Ollama 的 OpenAI 兼容端点。
+#   2. 本地服务器没有密钥,但 pi-ai 的 OpenAI 兼容实现要求鉴权头,
+#      因此必须给一个占位凭据(否则请求会被拒)。
+#   3. thinking 必须显式关掉。Ollama 默认 thinking=on,会在小模型上
+#      把输出预算吃光(实测 headless 任务从 1m20s 降到 14s)。
+#      注意 `reasoningEfforts: false` 不起作用,等级键也必须是固定枚举,
+#      写成 `off: none` 才能真正发出 reasoning_effort=none。
+- id: llm-pi-ai
+  config:
+    providers:
+      ollama:
+        displayName: Ollama (local)
+        api: openai-completions
+        baseURL: http://127.0.0.1:11434/v1
+        headers:
+          Authorization: Bearer ollama
+        models:
+          - id: qwen3.5:4b-mlx
+            name: Qwen3.5 4B (MLX)
+            contextWindow: 262144
+            reasoningEfforts:
+              off: none
+              high: high
+          - id: gemma4:e2b-mlx
+            name: Gemma4 E2B (MLX)
+            contextWindow: 131072
+            reasoningEfforts:
+              off: none
+              high: high
+
+# 默认模型 = gemma4:e2b-mlx(不是 qwen)。理由见 docs/LOCAL-MODEL-EVAL.md:
+# 短任务快 2-4 倍(18 题全集 18s vs 49s)、延迟更低、thinking 能收敛;
+# qwen 开 thinking 会陷入思维循环(1.6 万 token 预算写 4.5 万字符仍无输出)。
+# 不改这行,它就仍然走 deepseek-official。
+- id: agent-default-model
+  config:
+    provider: ollama
+    model: gemma4:e2b-mlx
+
+# ---------------------------------------------------------------------------
+# 工具面裁剪:本实例只服务本机小模型,出厂默认挂的 14 类工具用不上。
+#
+# 为什么写成 `disabled: true`,而不是"不写它就算了":
+#   本档案的 package.json 只挂了 dsh-base + dsh-headless 两个 bundle,
+#   cordis.yml 是 [],整棵插件树由 bundle 展开 —— 那些条目不是我们写的,
+#   所以"不引入"没有别的语法位置。一个 patch 条目能带的字段只有
+#   id / name / config / group / disabled / inject / intercept / isolate
+#   (见 `dsh --profile local --dump-config-schema` 的 $defs.patch),
+#   没有 remove/delete。出厂层自己就是这么关的(tool-ralph、skill-badge)。
+#   注意:`disabled` 不删包、不改 package.json、不动 bundle,只是组合时跳过。
+#
+# 保留(4 个插件 / 8 个工具,正好覆盖评测里的强项:单步、格式规整、视觉):
+#   tool-bash       -> bash
+#   tool-fs         -> read / write / edit / read_image
+#   tool-fs-search  -> glob / grep
+#   tool-todo       -> todo_write(多步任务时把进度外化)
+#
+# 关掉:
+#   tool-jobs      job_list / job_output / job_kill —— headless 单次任务用不到
+#   tool-skill     skill                            —— 本档案没装任何技能包
+#   tool-goal      create_goal / get_goal / update_goal
+#   tool-subagent  subagent / subagent_fork
+#   tool-subagent-control  send_message / interrupt_agent / list_agents
+#   tool-workflow  workflow    —— 以上四类都依赖多步推理(评测:多步逆推 0/2),
+#                                 且每开一个子代理都要重付一次上下文
+#   tool-web       web_search / web_fetch —— 走 DEEPSEEK_API_KEY,本实例没有凭据
+#   tool-pwsh      pwsh        —— 出厂已按平台禁用,这里写死以求跨平台一致
+#   plan-mode      exit_plan_mode —— headless 单次任务没有"计划模式"可言
+#
+# 实测(同一道题,读 storages/session_projcache 的计数;数字见 docs/LOCAL-MODEL-EVAL.md 附二):
+#   裁剪前:toolsTokens 4633 / systemTokens 651
+#   裁剪后:toolsTokens 1815 / systemTokens 220
+# 服务插件(goal / subagent / workflow-ptc / web / skill)不用动:它们自身
+# 既不产出工具,也不往系统提示里加字。实测只关 tool-* 就能拿到全部收益。
+- id: tool-pwsh
+  disabled: true
+- id: tool-jobs
+  disabled: true
+- id: tool-skill
+  disabled: true
+- id: tool-goal
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- id: tool-web
+  disabled: true
+- id: plan-mode
+  disabled: true
+
+# ---------------------------------------------------------------------------
+# 小模型要显式点名"必填参数",否则会填错字段。
+#
+# `bash` 要求 command + description 两个必填项,但 sandbox 升级字段
+# sandbox_permissions / justification 也出现在同一份 schema 里。实测同一道题:
+#   qwen3.5:4b —— 第 1 次漏 description,读到报错后自己补上
+#   gemma4:e2b —— 连续 4 次都填 justification 而不填 description,最后放弃
+# 在 system prompt 里点名这两个参数后,gemma4 连跑两轮共 7 次调用全部带上 description,
+# 缺参数报错 0 次。代价:systemTokens 220 -> 259(+39),toolsTokens 不变。
+#
+# 注意:patch 的 config 是【整体替换】,所以下面必须把出厂的两个字段一并写回,
+# 否则 personaPrefix / personaSuffix 会整个丢掉。{{model}} 与 {{cwd}} 插值不变。
+- id: system-prompt
+  config:
+    personaPrefix: You are a coding agent powered by the {{model}} model.
+    personaSuffix: >-
+      Your working directory is {{cwd}}.
+      The bash tool takes two required parameters: "command" and "description".
+      Always send both; "description" is a 5-10 word summary of what the command does.

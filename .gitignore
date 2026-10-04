@@ -1,0 +1,12 @@
+# 私有运行时数据 —— 对应 ../README.md 的「绝不要放进分享包」清单
+.anonymous-user-id
+.credentials.yaml
+sessions/
+storages/
+*.log
+
+# 安装产出（对方 dsh plugin install 一次即可）
+node_modules/
+
+# macOS
+.DS_Store
