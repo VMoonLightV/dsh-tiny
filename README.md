@@ -1,16 +1,25 @@
 # tiny — a DeepSeek Harness instance for local Ollama small models
 
 A minimal, headless **DeepSeek Harness (DSH)** instance whose agent runs entirely on small models
-served by a local [Ollama](https://ollama.com). No cloud API key, no UI, no third-party plugins —
-just one profile, `local`, composed from the factory `dsh-base` + `dsh-headless` bundles plus a
-single patch layer.
+served by a local [Ollama](https://ollama.com). No cloud API key, no UI, no third-party plugins.
+
+**This project is built on the DeepSeek Harness plugin system.** It is not a fork and ships no
+runtime code of its own: it is a single DSH *profile*, `local`, composed from the factory
+`@deepseek-ai/dsh-base` and `@deepseek-ai/dsh-headless` plugin bundles plus one patch layer that
+overrides two plugin configs and disables eleven plugin entries.
 
 Everything here was tuned against measurements taken on an Apple M4 / 16 GB with
 `gemma4:e2b-mlx`, so the defaults target 2–8 B parameter models rather than frontier models.
 
 ## Quick start
 
-Requires macOS or Linux, a running Ollama, and the models pulled:
+**This repository is not standalone.** It is a profile *for* DeepSeek Harness, and nothing here
+bundles or redistributes DSH. You need:
+
+1. **DeepSeek Harness (DSH) installed** — the `dsh` CLI together with the
+   `@deepseek-ai/dsh-base` and `@deepseek-ai/dsh-headless` plugin bundles it ships.
+2. macOS or Linux, with a running Ollama.
+3. The models pulled:
 
 ```sh
 ollama pull gemma4:e2b-mlx   # the default model
