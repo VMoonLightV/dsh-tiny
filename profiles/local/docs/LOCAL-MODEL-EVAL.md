@@ -397,3 +397,278 @@ slightly *faster*, because the unthinking runs burn tokens going nowhere. `n=2`:
 
 Because of this the `chat` profile sets `reasoningEffort: high` on `agent-default-model`, while
 `local` stays off — one is a conversation UI, the other a batch one-shot runner.
+
+---
+
+## Appendix 4: `gemma4:e4b-mlx` vs `gemma4:e2b-mlx` (2026-10-05)
+
+`gemma4:e4b-mlx` was added to Ollama afterwards and put through the identical prompt set, with the
+same profile, the same tools and the same nine tasks, so the two models are directly comparable.
+
+| | `gemma4:e2b-mlx` | `gemma4:e4b-mlx` |
+|---|---|---|
+| parameters | 5.2 B | 8.1 B |
+| size on disk | 7.5 GB | 9.5 GB |
+| context / quantisation | 131 072 / nvfp4 | 131 072 / nvfp4 |
+| capabilities | completion, vision, audio, tools, thinking | same |
+
+Both models were injected with `--patch` overlays rather than by editing this profile, and
+`reasoningEffort` was left unset (= thinking off, matching what `local` ships) except where stated.
+Every run below is a separate process against a fresh copy of the fixture tree.
+
+### 1. Tool surface, one task per tool
+
+| Task | `e2b` | `e4b` |
+|---|---|---|
+| `glob` *.md | ✅ 3.1 s | ✅ 7.3 s |
+| `grep` TODO in a file | ✅ 4.8 s | ✅ 7.8 s |
+| `read` a specific line | ✅ 5.8 s | ✅ 7.5 s |
+| `write` a one-line file | ⚠️ file landed, then `EMPTY_RESPONSE` (exit 1) 20.3 s | ✅ after one rejected call 14.8 s |
+| `edit` one word | ✅ after a blocked whole-file rewrite 6.6 s | ✅ after three rejected calls 17.9 s |
+| three-step `read`→count→`write` | ✅ 5.6 s | ❌ 22.9 s |
+| `read_image`: 2 red circles + 1 blue square | ❌ 6.0 s | ✅ 8.8 s |
+| `read_image`: OCR of `HARBOR 7391` | ✅ 4.9 s | ✅ 8.2 s |
+| `bash pwd` | ❌ no usable sandbox backend | ❌ same |
+
+Mean wall time over the nine runs above: **6.9 s (`e2b`) vs 11.6 s (`e4b`) — e4b is ~1.7× slower.**
+
+Because single runs say little, the three tasks that separated the models were repeated three
+times each:
+
+| Task, three repetitions | `e2b` | `e4b` |
+|---|---|---|
+| count the shapes (2 red circles, 1 blue square) | 1/3 correct | **3/3 correct** |
+| three-step file task → `count.txt` | **3/3 correct** | 0/3 |
+| `write` a one-line file | 3/3 files written | 2/3 files written |
+
+Pooled with the first round and with a second repetition inside the real workspace: **the three-step
+task is 6/6 for `e2b` and 0/8 for `e4b`** (the extra `e4b` runs were with the permission mode that
+lets `bash` run, in case the unusable shell was the real cause — it was not). That is the sharpest
+difference in this whole report, and it is not a knowledge difference — it is the escalation trap
+below.
+
+#### Token throughput
+
+Measured straight against the Ollama API (`prompt_eval_count`/`prompt_eval_duration` and
+`eval_count`/`eval_duration`), outside the harness, medians over three to four runs:
+
+| | prefill @200 tok | prefill @2 600 tok | decode |
+|---|---|---|---|
+| `e2b` | 2 618 t/s | 2 185 t/s | **70 t/s** |
+| `e4b` | 684 t/s | 621 t/s | **50 t/s** |
+
+That asymmetry is the interesting part. `e4b` is 1.56× the parameters but its **prefill is 3.5×
+slower**, while its **decode is only 1.4× slower**. Prefill is the number that matters here: `local`
+sends ~2 100 tokens of system prompt and tool schemas on *every* call, so the floor under each step
+is roughly **0.9 s for `e2b` and 3.3 s for `e4b`** before a single token is generated.
+
+Reading the LLM-call latency out of the session logs (`request/header` → `assistant/message`) confirms
+it. Eight one-tool runs, 16 calls:
+
+| | median | mean |
+|---|---|---|
+| `e2b` | 3.48 s | 3.60 s |
+| `e4b` | 6.80 s | 6.99 s |
+
+**1.95× per call** — worse than the 1.7× end-to-end figure, because end-to-end also contains process
+startup and tool execution, which cost the same for both models. `e4b` additionally writes more per
+step, which is where the remaining gap sits between 1.4× decode and 1.95× per call.
+
+One non-finding: turning thinking on *raises* the measured decode rate slightly (`e2b` 70 → 86 t/s,
+`e4b` 50 → 57 t/s). That is an artefact of longer generations amortising per-token overhead, not a
+real speed-up — reasoning tokens are generated at the same rate as any other token.
+
+### 2. The escalation trap: `justification` without `sandbox_permissions`
+
+`write`, `edit` and `bash` advertise two optional-looking escalation parameters,
+`sandbox_permissions` and `justification`. Supplying `justification` **alone** is always rejected:
+
+```
+Error: invalid escalation: justification is only valid together with sandbox_permissions
+```
+
+Both models fall into this, but they behave completely differently once they do:
+
+- **`e2b`** either omits both fields or sends the pair together, so its calls go through.
+- **`e4b`** sends `justification` alone, is rejected, and then **retries the same malformed call
+  almost verbatim**. On the worst run it made **19 tool calls and burned 58.5 s and 23 922 context
+  tokens without ever creating the file**, then died with `EMPTY_RESPONSE`. It never once paired the
+  two fields. On other runs it ends by asserting the file was created when it was not.
+
+Counting every tool call over the 40 prompt-sets that both models ran (environmental failures — the
+unusable sandbox backend — excluded):
+
+| | tool calls | self-inflicted errors | failed calls | `invalid escalation` |
+|---|---|---|---|---|
+| `e2b` | 78 | **9** | 12 % | 0 |
+| `e4b` | 115 | **82** | **71 %** | 40 |
+
+That is the whole difference in one table. `e4b` does not misunderstand the tasks — it fails
+argument validation, then keeps re-sending the same shape with the wording changed. Of its 82
+self-inflicted errors, 40 are `invalid escalation` and 35 are `bash` calls missing `description`: the
+same trap one field over. `e2b` logged **zero** escalation errors. The remaining errors are shared
+and mundane (7 reads of a file that had not been written yet, 1 write before read, 1 image read as
+text).
+
+### 2b. Prompting cannot fix it
+
+The fields cannot be removed from the schema. `dsh-tool-fs` advertises them whenever a confining
+backend is mounted (`...sandbox.escalationModes.length > 0 ? sandbox.schemaFields() : {}`), and
+disabling either `fs-sandbox` or `sandbox-policy` to suppress the advertisement takes the whole file
+tool set down with it: `write` then answers `unknown tool "write"`, and `bash`, `read` and `grep`
+never mount at all. So the trap had to be attacked with text — four variants, five repetitions each
+on the three-step task:
+
+| variant | added to `personaSuffix` | `e4b` three-step | `e4b` `write` |
+|---|---|---|---|
+| v0 (shipped) | — | **0/8** | 4/6 |
+| v2 | the `justification`/`sandbox_permissions` pairing rule | 1/5 | 2/2 |
+| v3 | + "if a call errors, change the arguments; never repeat it" | 0/5 | 2/2 |
+| v4 | + "create or modify files with write/edit, never shell redirection" | 0/5 | 2/2 |
+| v5 | + a worked example of the exact call to make | 0/5 | 2/2 |
+
+**One success in twenty attempts.** The same sentences do not hurt `e2b` (three-step 3/3 under v4).
+An earlier revision of this appendix reported this as 0/8 → 2/2 — that came from a two-run sample and
+is **retracted**; at five repetitions the effect is gone.
+
+The transcripts show why. Each of those four sentences is ignored in the same way:
+
+- v4 says *never shell redirection* → `e4b` runs `echo "4" > count.txt`.
+- v3/v4 say *do not repeat an erroring call, change the arguments* → it re-sends the identical call,
+  editing only the wording of `justification`.
+- The pairing rule is stated in prose → it still sends `justification` alone.
+- The error text names the missing field verbatim → it does not act on it.
+
+The cleanest demonstration came out of the failed attempt to remove the trap by disabling
+`fs-sandbox`. With `write` gone and only `bash` left, `e4b` sent `{"command": …, "justification": …}`
+**six times without `description`**, and narrated:
+
+> I must adhere strictly to the syntax: `bash(command: "...", justification: "...")`
+
+It invented a tool signature, obeyed its own invention over both the schema and the system prompt,
+and then reported the file as created. **The limitation is not knowing what to do — it is updating
+the next tool call from the previous tool result.** No `personaSuffix` can supply that.
+
+### 2c. What does move the needle: thinking
+
+Thinking gives the model a scratchpad in which to reconsider, and it is the one intervention with
+evidence behind it:
+
+| `e4b`, three-step task | result |
+|---|---|
+| thinking off, shipped prompt | 0/8 |
+| thinking off, v2 / v3 / v4 / v5 | 1/5, 0/5, 0/5, 0/5 |
+| **thinking high, shipped prompt** | **2/5** |
+
+In the run that passed, `e4b` reworded `justification` once, was rejected, and on the next call
+**dropped the field entirely** — a genuinely different shape, which is exactly what it never did with
+thinking off. It still costs: 23–59 s per run against 13–25 s, and 2/5 is nowhere near `e2b`'s 6/6.
+
+### 2d. What thinking actually costs, once tools are involved
+
+Appendix 3 concluded that thinking was "close to free". That held for a single-step text answer, where
+the unthinking run rambles through the same token budget anyway. It does **not** hold once tools are in
+play, because the agent thinks again on **every step**. Same four tool tasks, `e2b`, read out of the
+session logs:
+
+| | per-call median | per-call mean | steps carrying a reasoning block |
+|---|---|---|---|
+| thinking off | 3 478 ms | 3 603 ms | 0 / 8 |
+| thinking high | 5 700 ms | 6 852 ms | **8 / 8** |
+
+And on a composite task (read `data.csv` → sum the `qty` column → write `sum.txt`), which needs both a
+tool plan and arithmetic:
+
+| | success | tool calls | output tokens | wall time |
+|---|---|---|---|---|
+| thinking off | 2/3 | 2–4 | 99–502 | 3–8 s |
+| thinking high | **2/3** | 4–6 | 1 662–2 400 | 24–34 s |
+
+**Identical success, ~5× the wall time, 5–10× the output tokens.** Reasoning blocks measured
+200–3 000 characters each, and every step paid for one. So "thinking is free" is true only of a
+one-shot text answer; for the tool-using work `local` exists to do it is the most expensive knob in
+the profile. That is what settles the split — `local` stays off, `chat` stays high.
+
+---
+
+### 3. Vision: the one clear capability win
+
+On the same synthetic image (two red circles, one blue square) `e4b` was correct **4 times out of
+4**; `e2b` was correct **1 time out of 4** and twice answered "three red circles". `e2b` also
+sometimes reaches for `read` instead of `read_image` on a `.png` and then gets `binary file`, which
+is what happened in its first shapes run — so part of the gap is tool selection, not perception.
+The OCR image (`HARBOR 7391`) was transcribed exactly by both, twice each.
+
+Counting remains content-dependent even for `e4b`; treat this as "e4b is better at images", not as
+"e4b counts reliably".
+
+### 4. Multi-step reasoning: no advantage
+
+Three word problems with exact integer answers (7, 4, 27), two repetitions each, graded on the final
+number:
+
+| | thinking off | thinking high |
+|---|---|---|
+| `e2b` | 3/6 | 5/6 |
+| `e4b` | 2/6 | 4/6 |
+
+`e4b` is not better here, and at n=6 these differences are inside the noise. Both fail the same way:
+the "give away half plus half an apple" problem is mis-modelled from the start, and the
+thinking-off runs emit their chain directly into the answer channel. `e4b`'s unthinking output was
+the worst in the set — one run emitted **2 674 output tokens** of tangled algebra and still answered
+3.
+
+The thinking switch behaves the same as before: the session log carries `reasoningEffort: "high"`
+and one reasoning block per `high` run, and neither for the `off` runs. For `e4b`, turning thinking
+on moved it from 2/6 to 4/6 at roughly the same cost — 11.4 s mean per run over six `high` runs
+against 11.9 s over six `off` runs. That mean is dominated by whichever run pays for loading the
+model, so read it as "no worse", not as "faster".
+
+---
+
+### 5. `bash` is finally verified
+
+The `bash` tool was the one unresolved item from Appendix 3, blocked by this host having no usable
+sandbox backend (`sandbox-exec: sandbox_apply: Operation not permitted`). Running the same profile
+with the permission mode turned off closes it:
+
+```sh
+DSH_HOME=~/workspace/profiles/tiny DSH_PERMISSION_MODE=danger-full-access \
+  dsh --profile local --patch ./e4b.yml "run pwd and tell me the output"
+# tool_call bash {"command":"pwd","description":"Print the current working directory path"}
+# tool_result completed "/tmp/e4btest\n"
+# final: The output of the `pwd` command is `/tmp/e4btest`.
+```
+
+So `bash` works, and `e4b` sends `command` and `description` correctly when it is not distracted by
+the escalation fields. The earlier failure was the host, not the profile — but note the consequence
+for this profile as shipped: **on a host without a sandbox backend, `local` can read, write and
+search but cannot execute anything**, because there is no mode in which the tool will run unconfined
+without the caller opting in.
+
+---
+
+### 6. Recommendation
+
+Keep `gemma4:e2b-mlx` as the default. `e4b` is 60 % larger, 1.7× slower end to end (1.95× per LLM
+call), no better at reasoning, and it fails **71 % of its tool calls** against `e2b`'s 12 %. It is
+worth listing as a second model for image work, where it is clearly better — and it should not be
+pointed at multi-step file tasks under any prompt tried here.
+
+Two conclusions follow from the experiments above:
+
+1. **Do not try to prompt the escalation trap away.** Four variants, 20 runs, one success; the
+   sentence that looked like it worked over two runs did not survive five. If `e4b` is going to be
+   used at all, give it thinking — 0/8 → 2/5 is the only measured improvement, and it is still not
+   close to `e2b`. The "tell it to use `write` instead of shell redirection" line was tried (v4) and
+   changed nothing.
+2. **The real fix is upstream in DSH, not in this profile.** `validateEscalationArgs` treats a lone
+   `justification` as an error; ignoring a stray `justification` when `sandbox_permissions` is absent
+   would remove the trap for every small model — and the model most likely to read a schema field
+   description carefully is exactly the model that falls into it. The profile cannot express that
+   change, and both ways of suppressing the schema fields cost the file tools.
+
+One consequence of the investigation is worth keeping regardless of model choice: on a host with no
+usable sandbox backend, `local` can read, write and search but **cannot execute anything** — `bash`
+refuses to run unconfined and there is no profile-level setting that changes that, only the caller's
+`DSH_PERMISSION_MODE`.
