@@ -1,7 +1,7 @@
 # Launching the tiny harness
 
-Two ways in: a double-clickable launcher for the browser UI, and the plain `dsh` command line for
-headless one-shot tasks. This page covers both, plus what the launcher actually does.
+Three ways in: a double-clickable launcher for the browser UI, a terminal REPL, and the plain `dsh`
+command line for headless one-shot tasks. This page covers all three, plus what the launcher does.
 
 ---
 
@@ -143,7 +143,62 @@ an approval prompt, so the headless path is the one that needs `DSH_PERMISSION_M
 
 ---
 
-## 6. Troubleshooting
+## 6. The terminal chat — `tiny`
+
+[`bin/tiny`](../bin/tiny) is a REPL that keeps a conversation alive in the shell. It talks to the
+**headless** profile (`local`), one `dsh` process per turn, and continues the conversation with
+`--session-id` — the same multi-turn behaviour the browser UI has, without a browser and without
+thinking switched on.
+
+```sh
+./bin/tiny                       # start a conversation in the current directory
+./bin/tiny "one-shot question"   # answer once and exit
+```
+
+To get it as a plain command:
+
+```sh
+mkdir -p ~/.local/bin
+ln -sfn "$PWD/bin/tiny" ~/.local/bin/tiny
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+```
+
+### Commands
+
+| Command | Effect |
+|---|---|
+| `/new` | start a new conversation in this directory |
+| `/model` | list the models the profile registers, marking the current one |
+| `/model <id>` | switch model for the rest of the session |
+| `/model reset` | back to the profile's default model |
+| `/sessions` | the 15 most recent conversations, with title, age and directory |
+| `/sessions <n>` | switch to one of them |
+| `/help`, `/exit` | the obvious |
+
+Tool calls print as they happen (`⚙ grep {"pattern": "TODO", …}`), failures in red, and the answer
+at the end with wall time and token counts.
+
+### How it works
+
+- **State** lives in `~/.tiny-repl/`: `state.json` (the current session per working directory, plus
+  the selected model) and `model.yml`, a one-entry patch layer rewritten whenever `/model` changes.
+- **Sessions are per directory.** dsh refuses to adopt a session recorded elsewhere
+  (`session "…" was recorded in "/a", not "/b"`), so each directory keeps its own current
+  conversation, and `/sessions <n>` refuses to jump to one held in another directory.
+- **`/model` only offers registered models** — the list is read out of the profile's
+  `llm-pi-ai` → `models`. Add a model there before switching to it.
+- It exits rather than guessing if `TINY_PROFILE` names a browser-UI profile, which does not accept
+  `--json`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DSH_BIN` | the macOS app bundle path | the `dsh` CLI to run |
+| `TINY_PROFILE` | `local` | profile to chat through — must be a **headless** one |
+| `TINY_STATE_DIR` | `~/.tiny-repl` | where the session and the model choice are kept |
+
+---
+
+## 7. Troubleshooting
 
 | Symptom | Cause |
 |---|---|

@@ -35,6 +35,7 @@ bundles or redistributes DSH. You need:
 ```sh
 ollama pull gemma4:e2b-mlx   # the default model — Apple Silicon only
 ollama pull qwen3.5:4b-mlx   # optional second model, likewise Apple Silicon only
+ollama pull gemma4:e4b-mlx   # optional third model — better at images, slower everywhere
 ```
 
 Then clone and run. **`DSH_HOME` must point at this repository root** — the repo *is* the harness
@@ -73,6 +74,18 @@ It needs a **browser-UI profile**, which is not what `local` is — see
 [`docs/LAUNCHER.md`](docs/LAUNCHER.md) for what it checks, the `DSH_BIN` / `TINY_PROFILE` /
 `TINY_PORT` overrides, how to put it on the Desktop, and how to build the `chat` profile it expects.
 
+### Or chat in the terminal
+
+[`bin/tiny`](bin/tiny) is a REPL over the `local` profile — the same multi-turn conversation, in the
+shell, with `/model` and `/sessions` to switch models and conversations:
+
+```sh
+./bin/tiny                       # a conversation in the current directory
+./bin/tiny "one-shot question"   # answer once and exit
+```
+
+`/help` lists the commands. See [§6 of `docs/LAUNCHER.md`](docs/LAUNCHER.md#6-the-terminal-chat--tiny).
+
 ## Platform support
 
 **The default model is Apple Silicon only.** `gemma4:e2b-mlx` and `qwen3.5:4b-mlx` are MLX builds,
@@ -100,7 +113,7 @@ Every deviation from the factory layer lives in one file,
 
 | Decision | Why |
 |---|---|
-| Route the agent at `ollama/gemma4:e2b-mlx` (a second model, `qwen3.5:4b-mlx`, stays registered) | gemma4 is 2–4x faster on short tasks — full 18-question suite: 18 s vs 49 s |
+| Route the agent at `ollama/gemma4:e2b-mlx` (two more models stay registered: `qwen3.5:4b-mlx`, `gemma4:e4b-mlx`) | gemma4 is 2–4x faster on short tasks — full 18-question suite: 18 s vs 49 s |
 | Switch **thinking off**: `reasoningEfforts: {off: none, high: high}` | Ollama defaults to `thinking=on`, which spends the whole output budget on the chain of thought (same task: 1m20s → 14s) |
 | Trim the tool surface from 14 families to **8 tools** | the tool schemas cost 4633 tokens against a 651-token system prompt — 7x the context |
 | Name `bash`'s two required parameters in the system prompt | without it, gemma4 fills in `justification` instead of the required `description` on 4 out of 4 attempts |
@@ -115,13 +128,17 @@ Result, read from `storages/session_projcache` on the same task:
 | **this profile** | **1815** | **259** |
 
 To run a different local model, change the `model` field of the `agent-default-model` entry — as
-long as that model id is registered in the `llm-pi-ai` models list in the same file.
+long as that model id is registered in the `llm-pi-ai` models list in the same file. Before
+switching to `gemma4:e4b-mlx`, read [appendix 4](profiles/local/docs/LOCAL-MODEL-EVAL.md): it is
+registered for image work, not as a general upgrade.
 
 ## Layout
 
 ```
 .
 ├── Launch Tiny.command                 double-click launcher for the browser UI
+├── bin/
+│   └── tiny                            terminal REPL: /model, /sessions, /new
 ├── profiles/local/                     the headless profile — the batch runner
 │   ├── package.json                    bundles: @deepseek-ai/dsh-base + @deepseek-ai/dsh-headless
 │   ├── cordis.yml                      composition root, always []

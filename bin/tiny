@@ -1,0 +1,480 @@
+#!/usr/bin/env python3
+"""
+tiny — a terminal chat for this DeepSeek Harness instance.
+
+Talks to the `local` (headless) profile one turn at a time and keeps the
+conversation alive with `--session-id`, so a shell gets the same multi-turn
+behaviour the browser UI has, without a browser.
+
+  tiny                     start a conversation
+  tiny "one-shot question" answer once and exit
+
+Inside the REPL:
+  /new               start a new conversation
+  /model [id|reset]  show or switch the model
+  /sessions [n]      list or switch past conversations
+  /help, /exit
+
+Environment:
+  DSH_BIN            path to the dsh CLI          (default: the macOS app bundle)
+  TINY_PROFILE       profile to chat through      (default: local)
+  TINY_STATE_DIR     where the session is kept    (default: ~/.tiny-repl)
+"""
+
+import glob
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+SELF = os.path.realpath(__file__)
+TINY_DIR = os.path.dirname(os.path.dirname(SELF))
+# This repository *is* the harness instance, so every child dsh needs this.
+os.environ["DSH_HOME"] = TINY_DIR
+DSH_BIN = os.environ.get(
+    "DSH_BIN",
+    "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh",
+)
+PROFILE = os.environ.get("TINY_PROFILE", "local")
+STATE_DIR = os.path.expanduser(os.environ.get("TINY_STATE_DIR", "~/.tiny-repl"))
+STATE = os.path.join(STATE_DIR, "state.json")
+MODEL_PATCH = os.path.join(STATE_DIR, "model.yml")
+PROJ_CACHE = os.path.join(TINY_DIR, "storages", "session_projcache", "sessions")
+PROFILE_PATCH = os.path.join(TINY_DIR, "profiles", PROFILE, "cordis.patch.yml")
+
+TTY = sys.stdout.isatty()
+
+
+def c(code, text):
+    return "\033[%sm%s\033[0m" % (code, text) if TTY else text
+
+
+def dim(t):
+    return c("2", t)
+
+
+def red(t):
+    return c("31", t)
+
+
+def cyan(t):
+    return c("36", t)
+
+
+# --------------------------------------------------------------------------- state
+#
+# dsh refuses to adopt a session recorded in another directory, so the directory is
+# part of the state: each working directory keeps its own current conversation.
+
+
+def load_state():
+    try:
+        with open(STATE, encoding="utf-8") as fh:
+            d = json.load(fh)
+    except Exception:
+        d = {}
+    sessions = d.get("sessions")
+    if not isinstance(sessions, dict):
+        sessions = {}
+        if d.get("session") and d.get("cwd"):  # state written by an older version
+            sessions[d["cwd"]] = d["session"]
+    return sessions, d.get("model") or ""
+
+
+def save_state():
+    os.makedirs(STATE_DIR, exist_ok=True)
+    sessions = dict(SESSIONS)
+    if SESSION:
+        sessions[os.getcwd()] = SESSION
+    else:
+        sessions.pop(os.getcwd(), None)
+    tmp = STATE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"model": MODEL, "sessions": sessions}, fh, indent=1)
+    os.replace(tmp, STATE)
+    if MODEL:
+        with open(MODEL_PATCH, "w", encoding="utf-8") as fh:
+            fh.write(
+                "- id: agent-default-model\n"
+                "  config:\n"
+                "    provider: ollama\n"
+                "    model: %s\n" % MODEL
+            )
+    elif os.path.exists(MODEL_PATCH):
+        os.remove(MODEL_PATCH)
+
+
+# ----------------------------------------------------------------------- the models
+
+
+def available_models():
+    """Model ids registered in the profile's llm-pi-ai models list."""
+    try:
+        text = open(PROFILE_PATCH, encoding="utf-8").read()
+    except Exception:
+        return []
+    found, inside, base = [], False, 0
+    for raw in text.splitlines():
+        s = raw.rstrip()
+        if not s.strip() or s.lstrip().startswith("#"):
+            continue
+        indent = len(s) - len(s.lstrip())
+        if inside:
+            m = re.match(r"^\s*-\s*id:\s*(\S+)", s)
+            if m and indent > base:
+                found.append(m.group(1))
+                continue
+            if indent <= base:
+                inside = False
+        if re.match(r"^\s*models:\s*$", s):
+            inside, base = True, indent
+    return found
+
+
+def short_model(mid):
+    return mid.split(":")[-1].replace("-mlx", "") if mid else "?"
+
+
+def default_model():
+    try:
+        text = open(PROFILE_PATCH, encoding="utf-8").read()
+    except Exception:
+        return ""
+    block = re.search(r"- id: agent-default-model\n(.*?)(?=\n- id:|\Z)", text, re.S)
+    if not block:
+        return ""
+    m = re.search(r"^\s*model:\s*(\S+)", block.group(1), re.M)
+    return m.group(1) if m else ""
+
+
+# --------------------------------------------------------------------- the sessions
+
+
+def human_age(seconds):
+    if seconds < 90:
+        return "%ds" % int(seconds)
+    if seconds < 5400:
+        return "%dm" % int(seconds / 60)
+    if seconds < 172800:
+        return "%dh" % int(seconds / 3600)
+    return "%dd" % int(seconds / 86400)
+
+
+def list_sessions(limit=15):
+    """Recent sessions, newest first, as a list of (id, title, age, cwd)."""
+    files = glob.glob(os.path.join(PROJ_CACHE, "session-*.json"))
+    files.sort(key=os.path.getmtime, reverse=True)
+    out = []
+    for path in files[:limit]:
+        sid = os.path.basename(path)[:-5]
+        title, cwd = "(untitled)", ""
+        try:
+            rec = json.load(open(path, encoding="utf-8"))["record"]
+            title = (rec["rows"].get("title") or {}).get("val") or title
+            cwd = rec["identity"].get("cwd") or ""
+        except Exception:
+            title = "(unreadable)"
+        out.append((sid, title, human_age(time.time() - os.path.getmtime(path)), cwd))
+    return out
+
+
+# ---------------------------------------------------------------------- the commands
+
+
+def show_help():
+    print(
+        """
+%s
+
+  /new                开始一个新对话
+  /model              列出可用模型
+  /model <id>         切换模型（本次会话之后一直生效）
+  /model reset        回到档案里的默认模型
+  /sessions           列出最近的对话
+  /sessions <n>       切换到第 n 个对话
+  /help               这份帮助
+  /exit               退出（Ctrl-D 也行）
+
+直接输入内容就是提问。工具调用会实时显示，回答在最后。
+        """.strip()
+        % cyan("命令")
+    )
+
+
+def cmd_new():
+    global SESSION
+    SESSION = ""
+    save_state()
+    print(dim("  ✓ 新对话。下一条提问会开启一个新会话。"))
+
+
+def cmd_model(arg):
+    global MODEL
+    models = available_models()
+    fallback = default_model()
+
+    if not arg:
+        cur = MODEL or fallback
+        print(dim("  可用模型（* = 当前）"))
+        for m in models:
+            mark = "*" if m == cur else " "
+            tail = dim("  (档案默认)") if m == fallback else ""
+            print("   %s %s%s" % (mark, m, tail))
+        print(dim("  切换：/model <id>   回到默认：/model reset"))
+        return
+
+    if arg in ("reset", "default"):
+        MODEL = ""
+        save_state()
+        print(dim("  ✓ 回到档案默认模型：%s" % (fallback or "?")))
+        return
+
+    if models and arg not in models:
+        print(red("  ✗ 没有注册这个模型：%s" % arg))
+        print(dim("    已注册：%s" % ", ".join(models)))
+        print(dim("    要加新的，编辑 %s 的 llm-pi-ai models 列表。" % PROFILE_PATCH))
+        return
+
+    MODEL = arg
+    save_state()
+    print(dim("  ✓ 模型切到 %s" % arg))
+
+
+def cmd_sessions(arg):
+    global SESSION
+    rows = list_sessions()
+    if not rows:
+        print(dim("  还没有历史对话。"))
+        return
+
+    if not arg:
+        print(dim("  最近的对话（* = 当前）"))
+        for i, (sid, title, age, cwd) in enumerate(rows, 1):
+            mark = "*" if sid == SESSION else " "
+            print(
+                "   %s %2d. %-42s %5s  %s"
+                % (mark, i, title[:42], age, os.path.basename(cwd.rstrip("/")) or cwd)
+            )
+        print(dim("  切换：/sessions <n>   新开：/new"))
+        return
+
+    try:
+        n = int(arg)
+    except ValueError:
+        print(red("  ✗ 用法：/sessions <n>"))
+        return
+    if not 1 <= n <= len(rows):
+        print(red("  ✗ 序号超出范围（1-%d）" % len(rows)))
+        return
+
+    sid, title, _age, cwd = rows[n - 1]
+    here = os.getcwd()
+    if cwd and cwd != here:
+        print(red("  ✗ 那个对话记录在 %s，当前目录是 %s" % (cwd, here)))
+        print(dim("    dsh 只续接同一目录下的会话：先 cd 过去，再启动 tiny。"))
+        return
+
+    SESSION = sid
+    save_state()
+    print(dim("  ✓ 切到会话 %s  %s" % (SESSION[-8:], title)))
+
+
+def handle_command(line):
+    parts = line[1:].split(None, 1)
+    name = parts[0].lower() if parts else ""
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    if name in ("exit", "quit", "q"):
+        return False
+    if name in ("help", "h", "?"):
+        show_help()
+    elif name == "new":
+        cmd_new()
+    elif name in ("model", "m"):
+        cmd_model(arg)
+    elif name in ("sessions", "session", "s"):
+        cmd_sessions(arg)
+    else:
+        print(red("  ✗ 未知命令：/%s" % name))
+        print(dim("    /help 看可用命令"))
+    return True
+
+
+# ------------------------------------------------------------------------ the turn
+
+
+def short_json(obj, limit=150):
+    try:
+        s = json.dumps(obj, ensure_ascii=False)
+    except Exception:
+        s = str(obj)
+    return s if len(s) <= limit else s[: limit - 3] + "..."
+
+
+def first_line(value, limit=170):
+    s = str(value or "").strip().split("\n")[0]
+    return s if len(s) <= limit else s[: limit - 3] + "..."
+
+
+def run_turn(text):
+    global SESSION
+    cmd = [DSH_BIN, "--profile", PROFILE]
+    # Launcher flags must precede the app's own arguments (--json / --session-id).
+    if MODEL:
+        cmd += ["--patch", MODEL_PATCH]
+    cmd.append("--json")
+    if SESSION:
+        cmd += ["--session-id", SESSION]
+    cmd.append(text)
+
+    started = time.time()
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            cwd=os.getcwd(),
+        )
+    except FileNotFoundError:
+        print(red("  ✗ 找不到 dsh：%s" % DSH_BIN))
+        return
+
+    sid, final, last_text, usage = None, None, None, None
+    said = set()  # dsh reports the same failure twice: once as an event, once on stderr
+
+    def complain(msg):
+        msg = str(msg or "").strip()
+        if not msg:
+            return
+        key = msg[5:] if msg.startswith("dsh: ") else msg
+        if key in said:
+            return
+        said.add(key)
+        print(red("  ✗ " + first_line(msg)))
+
+    try:
+        for raw in proc.stdout:
+            raw = raw.rstrip("\n")
+            if not raw.strip():
+                continue
+            if not raw.startswith("{"):
+                complain(raw)
+                continue
+            try:
+                ev = json.loads(raw)
+            except Exception:
+                continue
+            kind = ev.get("type")
+            if kind == "session":
+                sid = ev.get("sessionId")
+            elif kind == "tool_call":
+                print(dim("  ⚙ %s %s" % (ev.get("tool"), short_json(ev.get("input")))))
+            elif kind == "tool_result":
+                if ev.get("status") != "completed":
+                    complain(ev.get("result"))
+            elif kind == "text":
+                last_text = ev.get("text")
+            elif kind == "final":
+                final = ev.get("text")
+            elif kind == "error":
+                complain(ev.get("message") or ev)
+            elif kind == "status" and ev.get("phase") == "step_end":
+                usage = ev.get("usage")
+    except KeyboardInterrupt:
+        proc.kill()
+        print(red("\n  ^C 已中断"))
+        return
+    proc.wait()
+
+    if sid and sid != SESSION:
+        SESSION = sid
+        save_state()
+
+    answer = (final if final is not None else last_text) or ""
+    if answer.strip():
+        print()
+        print(answer.strip())
+
+    bits = ["%.1fs" % (time.time() - started)]
+    if usage:
+        bits.append("in %s / out %s" % (usage.get("inputTokens", "?"), usage.get("outputTokens", "?")))
+    print()
+    print(dim("  " + " · ".join(bits)))
+    if proc.returncode not in (0, None):
+        print(red("  ✗ dsh 退出码 %d" % proc.returncode))
+
+
+# ------------------------------------------------------------------------ the shell
+
+
+def preflight():
+    pdir = os.path.join(TINY_DIR, "profiles", PROFILE)
+    if not os.path.isdir(pdir):
+        print(red("✗ 档案 %s 不在 %s/profiles/" % (PROFILE, TINY_DIR)))
+        return False
+    try:
+        manifest = open(os.path.join(pdir, "package.json"), encoding="utf-8").read()
+    except Exception:
+        manifest = ""
+    if "dsh-web-app" in manifest:
+        print(red("✗ 档案 %s 是浏览器界面档案，不接受 --json" % PROFILE))
+        print(dim("  终端对话要用 headless 档案，例如：TINY_PROFILE=local tiny"))
+        return False
+    if not os.path.exists(DSH_BIN):
+        print(red("✗ 找不到 dsh：%s" % DSH_BIN))
+        print(dim("  如果 App 装在别处：export DSH_BIN=/path/to/dsh"))
+        return False
+    os.makedirs(STATE_DIR, exist_ok=True)
+    return True
+
+
+SESSION, MODEL, SESSIONS = "", "", {}
+
+
+def main():
+    global SESSION, MODEL, SESSIONS
+    if not preflight():
+        return 1
+    SESSIONS, MODEL = load_state()
+    SESSION = SESSIONS.get(os.getcwd(), "")
+
+    if len(sys.argv) > 1:
+        run_turn(" ".join(sys.argv[1:]))
+        return 0
+
+    print()
+    print("  %s  %s" % (cyan("tiny"), dim(os.path.basename(os.getcwd()))))
+    print(dim("  模型 %s · 档案 %s · /help 看命令 · /exit 退出" % (MODEL or default_model() or "?", PROFILE)))
+    print()
+
+    while True:
+        tag = short_model(MODEL or default_model())
+        hint = SESSION[-4:] if SESSION else "new"
+        try:
+            line = input("%s[%s,%s]> " % (cyan("tiny"), tag, hint))
+        except EOFError:
+            print()
+            break
+        except KeyboardInterrupt:
+            print()
+            continue
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("/"):
+            if not handle_command(line):
+                break
+        else:
+            run_turn(line)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print()
+        sys.exit(130)
