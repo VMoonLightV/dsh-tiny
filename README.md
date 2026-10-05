@@ -1,13 +1,21 @@
 # tiny — a DeepSeek Harness instance for local Ollama small models
 
-A minimal, headless **[DeepSeek Harness](https://www.deepseek.com/harness/) (DSH)** instance whose
-agent runs entirely on small models
-served by a local [Ollama](https://ollama.com). No cloud API key, no UI, no third-party plugins.
+A minimal **[DeepSeek Harness](https://www.deepseek.com/harness/) (DSH)** instance whose agent runs
+entirely on small models served by a local [Ollama](https://ollama.com). No cloud API key, no
+third-party plugins.
 
 **This project is built on the DeepSeek Harness plugin system.** It is not a fork and ships no
-runtime code of its own: it is a single DSH *profile*, `local`, composed from the factory
-`@deepseek-ai/dsh-base` and `@deepseek-ai/dsh-headless` plugin bundles plus one patch layer that
-overrides two plugin configs and disables eleven plugin entries.
+runtime code of its own: it is two DSH *profiles*, each composed from factory plugin bundles plus
+one patch layer.
+
+| Profile | What it is | Started by |
+|---|---|---|
+| [`local`](profiles/local/) | headless — answers one task and exits | `dsh --profile local "…"` |
+| [`chat`](profiles/chat/) | browser UI, thinking on | [`Launch Tiny.command`](Launch%20Tiny.command) |
+
+Both mount the same local Ollama provider and the same eight tools. `chat` reaches its tool set
+through the web app's agent preset rather than the top-level entries, and is the one that carries a
+UI; `local` is the batch runner and is what every measurement here is about.
 
 Everything here was tuned against measurements taken on an Apple M4 / 16 GB with
 `gemma4:e2b-mlx`, so the defaults target 2–8 B parameter models rather than frontier models.
@@ -51,6 +59,19 @@ Inspect the composed configuration without booting anything:
 ```sh
 DSH_HOME="$PWD" dsh --profile local --dump-config
 ```
+
+### Or double-click it
+
+[`Launch Tiny.command`](Launch%20Tiny.command) in the repository root starts the harness in a
+browser instead of answering one task. Double-click it in Finder, or:
+
+```sh
+./Launch\ Tiny.command
+```
+
+It needs a **browser-UI profile**, which is not what `local` is — see
+[`docs/LAUNCHER.md`](docs/LAUNCHER.md) for what it checks, the `DSH_BIN` / `TINY_PROFILE` /
+`TINY_PORT` overrides, how to put it on the Desktop, and how to build the `chat` profile it expects.
 
 ## Platform support
 
@@ -100,7 +121,8 @@ long as that model id is registered in the `llm-pi-ai` models list in the same f
 
 ```
 .
-├── profiles/local/                     the only profile — this is the unit you would share
+├── Launch Tiny.command                 double-click launcher for the browser UI
+├── profiles/local/                     the headless profile — the batch runner
 │   ├── package.json                    bundles: @deepseek-ai/dsh-base + @deepseek-ai/dsh-headless
 │   ├── cordis.yml                      composition root, always []
 │   ├── cordis.patch.yml                every deviation from the factory layer, commented
@@ -108,8 +130,15 @@ long as that model id is registered in the `llm-pi-ai` models list in the same f
 │   └── docs/
 │       ├── LOCAL-MODEL-EVAL.md         model evaluation report (English)
 │       └── LOCAL-MODEL-EVAL.zh-CN.md   same report (Chinese)
+├── profiles/chat/                      the browser-UI profile
+│   ├── package.json                    bundles: @deepseek-ai/dsh-base + @deepseek-ai/dsh-web-app
+│   ├── cordis.yml
+│   └── cordis.patch.yml                same Ollama setup; thinking on; tool set via agent preset
+├── docs/
+│   └── LAUNCHER.md                     what the launcher checks, overrides, troubleshooting
 ├── sessions/                           runtime state — git-ignored, created on first run
 ├── storages/                           runtime state — git-ignored, created on first run
+├── attachments/                        runtime state — git-ignored, created on first run
 └── .gitignore
 ```
 

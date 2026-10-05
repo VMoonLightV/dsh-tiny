@@ -1,0 +1,250 @@
+# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+#
+# `chat` is the browser-UI sibling of `profiles/local`: same local Ollama provider, same eight
+# tools, but composed from dsh-base + dsh-web-app instead of dsh-headless, and with thinking left
+# on because a conversation is read by a human rather than batched. `Launch Tiny.command` in the
+# repository root boots this profile; profiles/local answers one headless task and exits.
+#
+# The factory layer already ships an `llm-pi-ai` entry, so this file only overrides its
+# config by id — no new plugin is needed. Three points, all learned the hard way:
+#
+#   1. `api: openai-completions` + a `baseURL` pointing at Ollama's OpenAI-compatible endpoint.
+#   2. The local server has no API key, but pi-ai's OpenAI-compatible adapter insists on an
+#      auth header, so a placeholder credential is mandatory (otherwise the request is rejected).
+#   3. thinking is a per-model switch, not a provider default: Ollama ships `thinking=on`, and
+#      pi-ai only sends `reasoning_effort` for a level the model entry declares. Declaring
+#      `off: none` is what makes "no effort configured" actually mean off. Capture of the wire
+#      request: unset and `off` both send `reasoning_effort: "none"`, `high` sends `"high"`.
+- id: llm-pi-ai
+  config:
+    providers:
+      ollama:
+        displayName: Ollama (local)
+        api: openai-completions
+        baseURL: http://127.0.0.1:11434/v1
+        headers:
+          Authorization: Bearer ollama
+        models:
+          - id: qwen3.5:4b-mlx
+            name: Qwen3.5 4B (MLX)
+            contextWindow: 262144
+            input: [text, image]
+            reasoningEfforts:
+              off: none
+              high: high
+          - id: gemma4:e2b-mlx
+            name: Gemma4 E2B (MLX)
+            contextWindow: 131072
+            input: [text, image]
+            reasoningEfforts:
+              off: none
+              high: high
+
+# `input` is not optional in practice: pi-ai falls back to DEFAULT_INPUT = ["text"] when a model
+# entry omits it, and dsh-tool-fs then refuses every image with `model "gemma4:e2b-mlx" does not
+# declare image input` — silently disabling read_image. See profiles/local for the same fix.
+
+# Default model = gemma4:e2b-mlx (not qwen). Rationale in
+# profiles/local/docs/LOCAL-MODEL-EVAL.md:
+# 2-4x faster on short tasks (full 18-question suite: 18s vs 49s), lower latency, and its
+# thinking converges; qwen's thinking collapses into a loop (16k-token budget, 45k characters
+# of chain, still no answer). Leave this entry alone and the agent keeps running on deepseek-official.
+#
+# `reasoningEffort: high` is set HERE and not in profiles/local, and the split is deliberate:
+# this profile is a conversation UI, the other is a batch one-shot runner. Thinking measurably
+# helps reasoning — on three word problems, 3/6 without it against 5/6 with it — and here the
+# user is reading one answer, not waiting on a batch.
+#
+# The cost is real and it is paid per STEP, not per question. On the same four tool tasks,
+# thinking took the per-call median from 3.5 s to 5.7 s; on a composite read/sum/write task it
+# took 3-8 s to 24-34 s with identical success (2/3 both ways). For a headless batch runner that
+# trade is bad, which is why profiles/local keeps it off. Full data:
+# profiles/local/docs/LOCAL-MODEL-EVAL.md, appendix 4, sections 2c and 2d.
+- id: agent-default-model
+  config:
+    provider: ollama
+    model: gemma4:e2b-mlx
+    reasoningEffort: high
+
+# ---------------------------------------------------------------------------
+# Tool-surface trimming: this instance only serves local small models, and the 14 tool
+# families the factory mounts by default are dead weight here.
+#
+# Why `disabled: true` instead of "just don't write it down":
+#   This profile's package.json mounts dsh-base + dsh-web-app, and cordis.yml is []. The entire
+#   plugin tree is expanded from those bundles — those entries
+#   are not ours, so "do not mount it" has nowhere else to be expressed. A patch entry can
+#   only carry id / name / config / group / disabled / inject / intercept / isolate
+#   (see `$defs.patch` from `dsh --profile local --dump-config-schema`); there is no
+#   remove/delete. The factory layer disables entries the same way (tool-ralph, skill-badge).
+#   Note: `disabled` deletes no package, does not touch package.json and leaves bundles
+#   alone — it only skips the entry during composition.
+#
+# These top-level disables are inert in this profile: the web app never reads the top-level tool
+# entries, it selects an agent preset instead (see the note above `preset-standard` at the
+# bottom). The reasons below are profiles/local's, copied here so the two profiles stay
+# diffable; nothing in this list actually runs in `chat`.
+#
+# Kept (4 plugins / 8 tools — exactly what the eval found these models good at:
+# single-step work, well-formed output, vision):
+#   tool-bash       -> bash
+#   tool-fs         -> read / write / edit / read_image
+#   tool-fs-search  -> glob / grep
+#   tool-todo       -> todo_write (externalises progress on multi-step tasks)
+#
+# Disabled:
+#   tool-jobs      job_list / job_output / job_kill — useless for a one-shot headless task
+#   tool-skill     skill                            — no skill package is installed here
+#   tool-goal      create_goal / get_goal / update_goal
+#   tool-subagent  subagent / subagent_fork
+#   tool-subagent-control  send_message / interrupt_agent / list_agents
+#   tool-workflow  workflow    — the four families above all need multi-step reasoning
+#                                (eval: multi-step inference 0/2), and every subagent
+#                                re-pays the full context
+#   tool-web       web_search / web_fetch — goes through DEEPSEEK_API_KEY; this instance has no credentials
+#   tool-pwsh      pwsh        — already platform-disabled by the factory; pinned here for cross-platform parity
+#   plan-mode      exit_plan_mode — a one-shot headless task has no "plan mode"
+#
+# Measured (same task, counts read from storages/session_projcache; figures also in
+# profiles/local/docs/LOCAL-MODEL-EVAL.md, appendix 2):
+#   before: toolsTokens 4633 / systemTokens 651
+#   after:  toolsTokens 1815 / systemTokens 220
+# The service plugins (goal / subagent / workflow-ptc / web / skill) need no attention: they
+# produce no tools themselves and add nothing to the system prompt. Measured: disabling the
+# tool-* entries alone captures the entire win.
+- id: tool-pwsh
+  disabled: true
+- id: tool-jobs
+  disabled: true
+- id: tool-skill
+  disabled: true
+- id: tool-goal
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- id: tool-web
+  disabled: true
+- id: plan-mode
+  disabled: true
+
+# ---------------------------------------------------------------------------
+# Small models need the required parameters spelled out, or they fill in the wrong field.
+#
+# `bash` requires both command and description, but the sandbox-escalation fields
+# sandbox_permissions / justification sit in the same schema. Same task, measured:
+#   qwen3.5:4b — missed description on the first try, added it after reading the error
+#   gemma4:e2b — filled justification instead of description 4 times in a row, then gave up
+# After naming both parameters in the system prompt, gemma4 sent description on all 7 calls
+# across two runs, with 0 missing-parameter errors. Cost: systemTokens 220 -> 259 (+39);
+# toolsTokens unchanged.
+#
+# `write` has the same failure mode, one level worse: gemma4 emits the long `content` value
+# first and then closes the JSON without appending `file_path`. Intermittent, and not
+# truncation — the arguments JSON parses cleanly, the key is simply absent (1 failure in 3
+# attempts; one 4.2 KB body succeeded). The hint below therefore names write's parameters and
+# their order too.
+#
+# In THIS profile the top-level `system-prompt` entry below is inert: the web app reads the
+# prompt from the active agent preset instead, so the same sentence is repeated inside
+# `preset-standard`'s persona further down. Keep the two in sync.
+#
+# Note: a patch `config` replaces the whole config, so both factory fields must be written
+# back below or personaPrefix / personaSuffix are dropped entirely. The {{model}} and {{cwd}}
+# interpolations are unchanged.
+- id: system-prompt
+  config:
+    personaPrefix: You are a coding agent powered by the {{model}} model.
+    personaSuffix: >-
+      Your working directory is {{cwd}}. The bash tool takes two required
+      parameters: "command" and "description". Always send both; "description"
+      is a 5-10 word summary of what the command does.
+- id: ui-settings-general
+  name: "@deepseek-ai/dsh-client-ui-settings-general"
+  config:
+    welcomeNoticeVersion: 2026-09-28.1
+- id: ui-theme
+  name: "@deepseek-ai/dsh-client-ui-theme"
+  config:
+    preference: light
+
+# ---------------------------------------------------------------------------
+# The web app never reads the top-level tool entries disabled above: it moves the agent's
+# tool set into a *nested agent preset*, and `agent-preset-registry` selects `standard` by
+# default. Every top-level `disabled` in this file is therefore inert here — which is why the
+# factory standard preset still costs ~5157 toolsTokens even though `local` is down to 1815.
+#
+# A patch `config` replaces the whole config, so this override restates the preset in full and
+# keeps only what this harness wants. Same eight tools as profiles/local, reached another way.
+#
+# Kept:    bash / read / write / edit / read_image / glob / grep / todo_write / present
+#          + persona (carries the required-parameter hint) + agent-instructions
+#          + the compaction group (context management; contributes no tools)
+#
+# `present` is kept deliberately. It is the only way to hand the user a file card, and the web
+# UI's deliverables panel (`dsh-client-ui-deliverables`) injects ~1300 characters of "use
+# present" guidance into the system prompt whether or not the tool exists. Dropping the tool
+# while keeping the guidance pays the tokens and loses the feature.
+#
+# Dropped: jobs, skill, goal, plan mode, the subagent/workflow/ralph delegation group,
+#          ask_user_question, web, plugin-manager
+- id: preset-standard
+  config:
+    id: standard
+    order: 1
+    plugins:
+      - id: persona
+        name: '@deepseek-ai/dsh-persona'
+        config:
+          prefix: You are a coding agent powered by the {{model}} model.
+          suffix: >-
+            Your working directory is {{cwd}}.
+            The bash tool takes two required parameters: "command" and "description".
+            Always send both; "description" is a 5-10 word summary of what the command does.
+            The write tool takes two required parameters: "file_path" and "content".
+            Send "file_path" first, then "content". Never omit either.
+      - id: agent-instructions
+        name: '@deepseek-ai/dsh-agent-instructions'
+        config:
+          maxBytes: 65536
+      - id: tool-bash
+        name: '@deepseek-ai/dsh-tool-bash'
+        disabled: !!js process.platform === 'win32'
+      - id: tool-fs
+        name: '@deepseek-ai/dsh-tool-fs'
+      - id: tool-fs-search
+        name: '@deepseek-ai/dsh-tool-fs-search'
+        config:
+          sampleOverCapGlobResults: false
+      - id: tool-todo
+        name: '@deepseek-ai/dsh-tool-todo'
+        config:
+          allowParallelInProgress: true
+      - id: present
+        name: '@deepseek-ai/dsh-tool-present'
+      - id: compaction
+        name: cordis:group
+        group: true
+        isolate:
+          compaction: true
+          toolResultPruner: true
+        config:
+          - id: compaction-basic
+            name: '@deepseek-ai/dsh-compaction-basic'
+          - id: command-compact
+            name: '@deepseek-ai/dsh-command-compact'
+          - id: tool-result-pruner
+            name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+            config:
+              thresholdChars: 8192
+              headChars: 4096
+              tailChars: 1024

@@ -3,6 +3,7 @@
 .credentials.yaml
 sessions/
 storages/
+attachments/
 *.log
 
 # 安装产出（clone 后跑一次 `dsh plugin --profile local install` 即可）
