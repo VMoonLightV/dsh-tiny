@@ -652,8 +652,9 @@ without the caller opting in.
 
 Keep `gemma4:e2b-mlx` as the default. `e4b` is 60 % larger, 1.7× slower end to end (1.95× per LLM
 call), no better at reasoning, and it fails **71 % of its tool calls** against `e2b`'s 12 %. It is
-worth listing as a second model for image work, where it is clearly better — and it should not be
-pointed at multi-step file tasks under any prompt tried here.
+registered as a third model in both profiles (`llm-pi-ai` in `profiles/local` and `profiles/chat`)
+so the image case can be selected deliberately — and it should not be pointed at multi-step file
+tasks under any prompt tried here.
 
 Two conclusions follow from the experiments above:
 

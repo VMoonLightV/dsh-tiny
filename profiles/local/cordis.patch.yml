@@ -37,11 +37,24 @@
             reasoningEfforts:
               off: none
               high: high
+          # Registered, but not the default. Measured head to head against e2b in
+          # docs/LOCAL-MODEL-EVAL.md appendix 4: ~1.7x slower end to end, no better at
+          # reasoning, and it fails 71% of its tool calls against e2b's 12% — the
+          # escalation trap, which it cannot recover from. Select it for image work,
+          # where it is clearly better (4/4 against 1/4 on shape counting); not for
+          # anything that spans several tool calls.
+          - id: gemma4:e4b-mlx
+            name: Gemma4 E4B (MLX)
+            contextWindow: 131072
+            input: [text, image]
+            reasoningEfforts:
+              off: none
+              high: high
 
 # `input` is not optional in practice. pi-ai falls back to DEFAULT_INPUT = ["text"] for any
 # model entry that omits it, and dsh-tool-fs then refuses every image: `model
-# "gemma4:e2b-mlx" does not declare image input`. Both models below do handle images — that
-# was measured, but by calling Ollama directly, which never consults this profile. Leaving
+# "gemma4:e2b-mlx" does not declare image input`. All three models above do handle images —
+# that was measured, but by calling Ollama directly, which never consults this profile. Leaving
 # the field out silently disables the read_image tool. MODALITIES is exactly text | image.
 
 # Default model = gemma4:e2b-mlx (not qwen). Rationale in docs/LOCAL-MODEL-EVAL.md:
